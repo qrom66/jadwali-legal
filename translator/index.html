@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>مترجم فوري</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;600&family=Noto+Naskh+Arabic:wght@500;600&display=swap">
+<style>
+:root {
+  --bg: #f2f4f7; --panel: #fff; --fg: #16202e; --muted: #5d6878; --line: #dde2ea;
+  --accent: #1b5fc4; --live: #c2410c; --stop: #b42318;
+  --ui: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+  --ar: "Noto Naskh Arabic", "Traditional Arabic", serif;
+  --en: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0f141b; --panel: #171e28; --fg: #e6ebf2; --muted: #93a0b2; --line: #2a3442;
+  --accent: #6ea3f2; --live: #fb923c; --stop: #f97066; color-scheme: dark } }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font-family: var(--ui); }
+.app {
+  height: 100%; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px;
+  padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+header { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+h1 { margin: 0; font-size: 1.2rem; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+.seg button { border: 0; border-radius: 0; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--panel); font-weight: 600; }
+button { font: inherit; font-size: .95rem; cursor: pointer; border-radius: 10px; padding: 8px 12px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+.feed { flex: 1; min-height: 0; overflow-y: auto; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+.item { display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.s { font-size: .85rem; color: var(--muted); unicode-bidi: plaintext; }
+.t { font-size: 1.4rem; line-height: 1.75; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.t.ar { font-family: var(--ar); font-size: 1.5rem; }
+.t.en { font-family: var(--en); }
+.item.live .t { color: var(--live); }
+.empty { margin: auto; color: var(--muted); text-align: center; line-height: 1.9; max-width: 32ch; }
+.bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+#mic { flex: 1; min-width: 180px; padding: 16px; font-size: 1.15rem; font-weight: 600;
+  background: var(--accent); border-color: var(--accent); color: var(--panel); border-radius: 14px; }
+#mic.on { background: var(--stop); border-color: var(--stop); }
+.status { font-size: .85rem; color: var(--muted); }
+.status.err { color: var(--stop); }
+label { display: inline-flex; gap: 6px; align-items: center; font-size: .9rem; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>مترجم فوري</h1>
+    <div class="seg" role="group" aria-label="اتجاه الترجمة">
+      <button id="d-en" aria-pressed="true">المتحدث: English</button>
+      <button id="d-ar" aria-pressed="false">المتحدث: عربي</button>
+    </div>
+  </header>
+  <div id="feed" class="feed"><div class="empty">اختر لغة المتحدث فوق، ثم اضغط 🎤 ابدأ.<br>الترجمة تظهر هنا لحظة بلحظة.</div></div>
+  <div class="bar">
+    <button id="mic">🎤 ابدأ الترجمة</button>
+    <label><input id="tts" type="checkbox"> نطق</label>
+    <button id="clear">مسح</button>
+  </div>
+  <div id="status" class="status">المتحدث يتكلم: English</div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const feed = $("feed"), statusEl = $("status"), micBtn = $("mic");
+// src = language the speaker is using
+let src = "en", running = false, rec = null, liveItem = null, liveTimer = null, lastLive = "", started = false;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+function status(t, err) { statusEl.textContent = t; statusEl.classList.toggle("err", !!err); }
+function tgt() { return src === "en" ? "ar" : "en"; }
+function nearBottom() { return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 100; }
+function scroll(stick) { if (stick) feed.scrollTop = feed.scrollHeight; }
+
+async function translate(text, from, to) {
+  try {
+    const r = await fetch("https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=" + from + "&tl=" + to + "&q=" + encodeURIComponent(text));
+    const j = await r.json();
+    return j[0].map(x => x[0]).join("");
+  } catch (e) {
+    const r = await fetch("https://api.mymemory.translated.net/get?langpair=" + from + "|" + to + "&q=" + encodeURIComponent(text));
+    const j = await r.json();
+    return j.responseData.translatedText;
+  }
+}
+
+function makeItem() {
+  if (!started) { feed.textContent = ""; started = true; }
+  const el = document.createElement("div"); el.className = "item live";
+  const s = document.createElement("div"); s.className = "s";
+  const t = document.createElement("div"); t.className = "t " + tgt();
+  el.append(s, t); feed.append(el);
+  return { el, s, t };
+}
+
+function showLive(text) {
+  const stick = nearBottom();
+  if (!liveItem) liveItem = makeItem();
+  liveItem.s.textContent = text;
+  scroll(stick);
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(async () => {          // translate the in-progress phrase so you don't wait for the speaker to pause
+    if (!liveItem || text === lastLive) return;
+    lastLive = text;
+    const item = liveItem, from = src, to = tgt();
+    try { const tr = await translate(text, from, to); if (item === liveItem) { const st = nearBottom(); item.t.textContent = tr; scroll(st); } } catch {}
+  }, 350);
+}
+
+async function finalize(text) {
+  clearTimeout(liveTimer); lastLive = "";
+  const item = liveItem || makeItem(); liveItem = null;
+  item.s.textContent = text;
+  const from = src, to = tgt();
+  try {
+    const tr = await translate(text, from, to);
+    const stick = nearBottom();
+    item.t.textContent = tr; item.el.classList.remove("live"); scroll(stick);
+    if ($("tts").checked) speak(tr, to);
+  } catch { item.t.textContent = "⚠️ تعذرت الترجمة — تأكد من الإنترنت"; }
+}
+
+function speak(text, lang) {
+  if (!window.speechSynthesis) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = lang === "ar" ? "ar-SA" : "en-US";
+  speechSynthesis.speak(u);
+}
+
+function startRec() {
+  if (!SR) { status("المتصفح ما يدعم المايك. افتح الرابط في Safari (آيفون) أو Chrome (أندرويد).", true); return; }
+  rec = new SR();
+  rec.lang = src === "en" ? "en-US" : "ar-SA";
+  rec.continuous = true; rec.interimResults = true;
+  rec.onresult = e => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) finalize(r[0].transcript.trim());
+      else interim += r[0].transcript;
+    }
+    if (interim.trim()) showLive(interim.trim());
+  };
+  rec.onerror = e => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") { running = false; setBtn(); status("اسمح للمتصفح باستخدام المايك من إعدادات الموقع ثم اضغط ابدأ.", true); }
+  };
+  rec.onend = () => { if (running) { try { rec.start(); } catch { setTimeout(startRec, 300); } } };  // keep listening through pauses
+  try { rec.start(); } catch {}
+  status("يسمع… المتحدث يتكلم: " + (src === "en" ? "English" : "عربي"));
+}
+
+function setBtn() { micBtn.classList.toggle("on", running); micBtn.textContent = running ? "⏹ إيقاف" : "🎤 ابدأ الترجمة"; }
+micBtn.onclick = () => {
+  running = !running; setBtn();
+  if (running) startRec(); else { if (rec) rec.stop(); status("متوقف"); }
+};
+function setDir(d) {
+  src = d;
+  $("d-en").setAttribute("aria-pressed", String(d === "en"));
+  $("d-ar").setAttribute("aria-pressed", String(d === "ar"));
+  status("المتحدث يتكلم: " + (d === "en" ? "English" : "عربي"));
+  if (running && rec) { rec.onend = null; rec.stop(); startRec(); }
+}
+$("d-en").onclick = () => setDir("en");
+$("d-ar").onclick = () => setDir("ar");
+$("clear").onclick = () => { feed.textContent = ""; liveItem = null; started = true; };
+</script>
+</body>
+</html>
