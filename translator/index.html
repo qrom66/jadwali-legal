@@ -102,7 +102,9 @@ label { display: inline-flex; gap: 6px; align-items: center; font-size: .9rem; }
 const $ = id => document.getElementById(id);
 const enBox = $("en"), arBox = $("ar"), statusEl = $("status"), micBtn = $("mic");
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-const isChrome = /Chrome|CriOS/.test(navigator.userAgent);
+// Phones and tablets: the built-in mic is the right one, and iOS shares one mic between the level meter and speech recognition
+const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+const isChrome = /Chrome/.test(navigator.userAgent) && !isMobile;
 
 let src = "en";
 let running = false, rec = null, live = null, started = false, lastFinalAt = 0, paraEn = null, paraAr = null;
@@ -279,14 +281,15 @@ function speak(text, lang) {
 
 // Shows which microphone the browser is using and how loud the room sounds
 async function startMeter() {
+  if (isMobile) { $("micName").textContent = "مايك الجوال"; $("micName").classList.remove("bad"); return; }
   try {
     meterStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
     const track = meterStream.getAudioTracks()[0];
     const name = track.label || "الافتراضي";
     const el = $("micName");
     el.textContent = name;
-    el.classList.toggle("bad", /iphone|ipad|airpods/i.test(name));
-    if (/iphone|ipad/i.test(name)) status("⚠️ المتصفح يستخدم مايك الآيفون. غيّره لمايك الماك من: إعدادات النظام ← الصوت ← الإدخال", "err");
+    el.classList.toggle("bad", /iphone|ipad/i.test(name));
+    if (/iphone|ipad/i.test(name)) status("ℹ️ الماك يستخدم مايك الآيفون. إذا تبي مايك الماك غيّره من أيقونة المايك في شريط العنوان", "");
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const an = ctx.createAnalyser(); an.fftSize = 512;
     ctx.createMediaStreamSource(meterStream).connect(an);
