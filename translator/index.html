@@ -212,6 +212,109 @@ $("keyRemove").onclick = () => {
   $("keyPanel").hidden = true; showEngine(); status("تم الحذف");
 };
 showEngine();
+
+// iPhone / Safari: their built-in speech recognition is unreliable, so record the mic here,
+// cut the audio at natural pauses, and let Whisper on the Worker turn each piece into text.
+const UA = navigator.userAgent;
+const desktopOrAndroidChrome = /Chrome|Android/.test(UA) && !/iPhone|iPad|iPod|CriOS/.test(UA) && !(/Macintosh/.test(UA) && navigator.maxTouchPoints > 1);
+const useWhisper = !!PROXY && !desktopOrAndroidChrome;
+let wh = null;
+
+function encodeWav(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
+  const w = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) { const x = Math.max(-1, Math.min(1, samples[i])); v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true); }
+  return new Uint8Array(buf);
+}
+function toBase64(bytes) {
+  let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function downsample(chunks, inRate) {
+  const total = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(total);
+  let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
+  const ratio = inRate / 16000, out = new Float32Array(Math.floor(total / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(total, Math.floor((i + 1) * ratio));
+    let sum = 0; for (let j = a; j < b; j++) sum += all[j]; out[i] = sum / Math.max(1, b - a);
+  }
+  return out;
+}
+
+async function sendChunk(chunks, rate) {
+  const item = makeItem();
+  stickBoth(() => { item.srcEl.textContent = "…"; item.trEl.textContent = "…"; });
+  const wav = encodeWav(downsample(chunks, rate), 16000);
+  try {
+    const r = await fetch("/transcribe", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: claudeKey, audio: toBase64(wav), language: item.from }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw Object.assign(new Error(data.error || "error"), { status: data.error === "bad_pin" ? "pin" : r.status });
+    const text = (data.text || "").trim();
+    if (!text) { item.srcEl.remove(); item.trEl.remove(); return; }
+    finalize(text, item);
+  } catch (e) {
+    item.srcEl.remove(); item.trEl.remove();
+    status(e.status === "pin" ? "رمز الدخول غلط — صحّحه من زر 🔑" :
+           e.status === 404 ? "الموقع يحتاج تحديث في Cloudflare عشان يشتغل على الآيفون" :
+           "تعذر تحويل الصوت لنص — يكمل يحاول", "err");
+  }
+}
+
+async function startWhisper() {
+  if (!claudeKey) { $("keyPanel").hidden = false; status("اكتب رمز الدخول أول", "err"); stopAll(); return; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  ctx.resume();
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true } }); }
+  catch { ctx.close(); stopAll(); status("المتصفح ما عنده إذن للمايك. اسمح بالمايك من إعدادات Safari ثم اضغط ابدأ.", "err"); return; }
+  if (!running) { stream.getTracks().forEach(t => t.stop()); ctx.close(); return; }
+  $("micName").textContent = isMobile ? "مايك الجوال" : (stream.getAudioTracks()[0].label || "الافتراضي");
+  const srcNode = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  const mute = ctx.createGain(); mute.gain.value = 0;
+  srcNode.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+  const rate = ctx.sampleRate, blockSec = 4096 / rate;
+  // Cut at a pause once a phrase has ~1s of speech, or force a cut after 7s of nonstop talking
+  let chunks = [], speech = 0, silence = 0, noise = 0.01;
+  const preroll = [];
+  proc.onaudioprocess = e => {
+    const x = new Float32Array(e.inputBuffer.getChannelData(0));
+    let sq = 0; for (let i = 0; i < x.length; i += 4) sq += x[i] * x[i];
+    const rms = Math.sqrt(sq / (x.length / 4));
+    $("level").style.width = Math.min(100, rms * 600) + "%";
+    const loud = rms > Math.max(0.004, noise * 2.2);
+    if (!loud) noise = noise * 0.97 + rms * 0.03;
+    if (loud) {
+      if (!chunks.length) { chunks.push(...preroll); status("🗣️ يلتقط كلام — " + label(), "good"); }
+      chunks.push(x); speech += blockSec; silence = 0;
+    } else if (chunks.length) {
+      chunks.push(x); silence += blockSec;
+    } else {
+      preroll.push(x); if (preroll.length > 4) preroll.shift();
+    }
+    const length = chunks.length * blockSec;
+    if (chunks.length && ((speech >= 0.8 && silence >= 0.6) || length >= 7)) {
+      const piece = chunks; chunks = []; speech = 0; silence = 0;
+      sendChunk(piece, rate);
+    } else if (chunks.length && speech < 0.3 && silence >= 0.8) {
+      chunks = []; speech = 0; silence = 0;   // a short noise, not speech
+    }
+  };
+  wh = { ctx, stream, proc };
+  status("🎙️ يسمع — " + label(), "good");
+}
+function stopWhisper() {
+  if (!wh) return;
+  wh.proc.onaudioprocess = null;
+  wh.stream.getTracks().forEach(t => t.stop());
+  wh.ctx.close().catch(() => {});
+  wh = null; $("level").style.width = "0";
+}
+
 if (PROXY && !claudeKey) { $("keyPanel").hidden = false; status("اكتب رمز الدخول عشان تشتغل ترجمة Claude"); }
 
 // Text flows as one long script; a new paragraph starts only after a long pause
@@ -251,9 +354,10 @@ function showLive(text) {
   item.timer = setTimeout(() => { if (item.lastSent !== text && item === live) translateInto(item, text); }, wait);
 }
 
-async function finalize(text) {
+async function finalize(text, given) {
   if (!text) return;
-  const item = live || makeItem(); live = null;
+  let item = given;
+  if (!item) { item = live || makeItem(); live = null; }
   clearTimeout(item.timer);
   lastFinalAt = Date.now();
   item.srcEl.textContent = text; item.srcEl.className = "";
@@ -363,15 +467,16 @@ function stopAll() {
   if (rec) { rec.onend = null; try { rec.stop(); } catch {} }
   if (live && live.srcEl.textContent) finalize(live.srcEl.textContent);
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
-  stopMeter();
+  stopMeter(); stopWhisper();
 }
 micBtn.onclick = () => {
   if (running) { stopAll(); status("متوقف"); return; }
   running = true; setBtn();
   status("يشغّل المايك…");
+  if (useWhisper) { startWhisper(); keepAwake(); return; }
   startMeter(); startRec(); startWatchdog(); keepAwake();
 };
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && running) { keepAwake(); touch(); startRec(); } });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && running && !useWhisper) { keepAwake(); touch(); startRec(); } });
 
 function setDir(d) {
   src = d;
@@ -380,7 +485,7 @@ function setDir(d) {
   if (live && live.srcEl.textContent) finalize(live.srcEl.textContent);
   live = null;
   status(label());
-  if (running) startRec();
+  if (running && !useWhisper) startRec();
 }
 $("d-en").onclick = () => setDir("en");
 $("d-ar").onclick = () => setDir("ar");
