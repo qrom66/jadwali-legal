@@ -88,7 +88,7 @@ label { display: inline-flex; gap: 6px; align-items: center; font-size: .9rem; }
   <div id="keyPanel" class="keypanel" hidden>
     <input id="keyInput" type="password" placeholder="sk-ant-..." autocomplete="off" dir="ltr">
     <button id="keySave">حفظ</button>
-    <button id="keyRemove">حذف المفتاح</button>
+    <button id="keyRemove">حذف</button>
     <span class="hint">المفتاح ينحفظ في متصفحك هذا بس، وما يرفع لأي مكان غير Anthropic.</span>
   </div>
   <div class="info">
@@ -127,12 +127,22 @@ async function translate(text, from, to) {
   }
 }
 
-// Finished sentences are translated by Claude when a key is saved; Google only fills in while a sentence is still being spoken
+// Finished sentences are translated by Claude; Google only fills in while a sentence is still being spoken.
+// Served by the Cloudflare Worker, the page sends text to /translate with a PIN (the API key stays on the server);
+// opened anywhere else, it calls Claude directly with a key saved in this browser.
+const PROXY = window.TRANSLATE_PROXY || "";
 const CLAUDE_MODEL = "claude-haiku-5-5";
 const SDK_URL = "https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.131.0/+esm";
-let claudeKey = "";
-try { claudeKey = localStorage.getItem("claudeKey") || ""; } catch {}
+const STORE = PROXY ? "appPin" : "claudeKey";
+let claudeKey = "";   // the PIN in proxy mode, the API key otherwise
+try { claudeKey = localStorage.getItem(STORE) || ""; } catch {}
 let clientPromise = null, recent = [];
+
+if (PROXY) {
+  $("keyBtn").textContent = "🔑 رمز الدخول";
+  $("keyInput").placeholder = "رمز الدخول";
+  $("keyPanel").querySelector(".hint").textContent = "اكتب رمز الدخول مرة وحدة، وينحفظ في هذا الجهاز.";
+}
 
 function showEngine() { const e = $("engine"); e.textContent = claudeKey ? "Claude ✓" : "Google"; e.classList.toggle("on", !!claudeKey); }
 function getClaude() {
@@ -141,14 +151,9 @@ function getClaude() {
     .catch(e => { clientPromise = null; throw e; });
   return clientPromise;
 }
-async function claudeTranslate(text, from, to, context) {
-  const client = await getClaude();
+function buildPrompt(text, to, context) {
   const target = to === "ar" ? "clear, natural Modern Standard Arabic" : "clear, natural English";
-  const res = await client.messages.create({
-    model: CLAUDE_MODEL,
-    max_tokens: 2000,
-    thinking: { type: "adaptive" },
-    output_config: { effort: "low" },
+  return {
     system: "You are a live conference interpreter helping a listener follow a speaker. " +
       "Translate the text inside <speech_to_translate> into " + target + ", faithfully and completely. " +
       "Keep every detail the speaker said: words like first, next, last, this, today; the exact event words (conference, session, talk, event); " +
@@ -157,7 +162,26 @@ async function claudeTranslate(text, from, to, context) {
       "The text comes from speech recognition and may lack punctuation or stop mid-sentence; translate it as it is. " +
       "Only fix a word if it is clearly a recognition error that makes no sense in the sentence. " +
       "The earlier speech is for context only: never translate or repeat it. Reply with the translation only, no notes or quotes.",
-    messages: [{ role: "user", content: (context ? "<earlier_speech_for_context>\n" + context + "\n</earlier_speech_for_context>\n\n" : "") + "<speech_to_translate>\n" + text + "\n</speech_to_translate>" }]
+    content: (context ? "<earlier_speech_for_context>\n" + context + "\n</earlier_speech_for_context>\n\n" : "") +
+      "<speech_to_translate>\n" + text + "\n</speech_to_translate>"
+  };
+}
+async function claudeTranslate(text, from, to, context) {
+  const { system, content } = buildPrompt(text, to, context);
+  if (PROXY) {
+    const r = await fetch(PROXY, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: claudeKey, system, content }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { const err = new Error(data.message || data.error || "error"); err.status = data.error === "bad_pin" ? "pin" : (data.status || r.status); throw err; }
+    return data.text;
+  }
+  const client = await getClaude();
+  const res = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 2000,
+    thinking: { type: "adaptive" },
+    output_config: { effort: "low" },
+    system,
+    messages: [{ role: "user", content }]
   });
   const out = res.content.filter(b => b.type === "text").map(b => b.text).join("").trim();
   if (!out) throw new Error("empty response");
@@ -165,7 +189,8 @@ async function claudeTranslate(text, from, to, context) {
 }
 function claudeError(e) {
   const s = e?.status;
-  status(s === 401 ? "مفتاح Claude غير صحيح — صحّحه من زر 🔑" :
+  status(s === "pin" ? "رمز الدخول غلط — صحّحه من زر 🔑" :
+         s === 401 ? "مفتاح Claude غير صحيح" + (PROXY ? " — صحّحه في إعدادات Cloudflare" : " — صحّحه من زر 🔑") :
          s === 402 || s === 400 && /credit/i.test(e?.message || "") ? "رصيد Anthropic خلص — اشحن الحساب" :
          s === 429 ? "ضغط على Claude — يستخدم Google مؤقتًا" :
          "تعذر الوصول لـ Claude — يستخدم Google مؤقتًا", "err");
@@ -176,15 +201,16 @@ $("keySave").onclick = () => {
   const k = $("keyInput").value.trim();
   if (!k) return;
   claudeKey = k; clientPromise = null;
-  try { localStorage.setItem("claudeKey", k); } catch {}
-  $("keyInput").value = ""; $("keyPanel").hidden = true; showEngine(); status("تم حفظ المفتاح — الترجمة الحين بـ Claude", "good");
+  try { localStorage.setItem(STORE, k); } catch {}
+  $("keyInput").value = ""; $("keyPanel").hidden = true; showEngine(); status("تم الحفظ — الترجمة الحين بـ Claude", "good");
 };
 $("keyRemove").onclick = () => {
   claudeKey = ""; clientPromise = null;
-  try { localStorage.removeItem("claudeKey"); } catch {}
-  $("keyPanel").hidden = true; showEngine(); status("تم حذف المفتاح");
+  try { localStorage.removeItem(STORE); } catch {}
+  $("keyPanel").hidden = true; showEngine(); status("تم الحذف");
 };
 showEngine();
+if (PROXY && !claudeKey) { $("keyPanel").hidden = false; status("اكتب رمز الدخول عشان تشتغل ترجمة Claude"); }
 
 // Text flows as one long script; a new paragraph starts only after a long pause
 function newParagraph() {
