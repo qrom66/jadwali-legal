@@ -56,6 +56,12 @@ button { font: inherit; font-size: .95rem; cursor: pointer; border-radius: 10px;
 .meter i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .1s; }
 #micName.bad { color: var(--stop); font-weight: 600; background: var(--warn-bg); padding: 2px 8px; border-radius: 6px; }
 label { display: inline-flex; gap: 6px; align-items: center; font-size: .9rem; }
+.keypanel { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; direction: rtl; }
+.keypanel[hidden] { display: none; }
+#keyInput { flex: 1; min-width: 220px; font: inherit; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+.hint { font-size: .8rem; color: var(--muted); }
+#engine.on { color: var(--ok); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -77,11 +83,19 @@ label { display: inline-flex; gap: 6px; align-items: center; font-size: .9rem; }
     <button id="mic">🎤 ابدأ الترجمة</button>
     <label><input id="tts" type="checkbox"> نطق</label>
     <button id="clear">مسح</button>
+    <button id="keyBtn">🔑 Claude</button>
+  </div>
+  <div id="keyPanel" class="keypanel" hidden>
+    <input id="keyInput" type="password" placeholder="sk-ant-..." autocomplete="off" dir="ltr">
+    <button id="keySave">حفظ</button>
+    <button id="keyRemove">حذف المفتاح</button>
+    <span class="hint">المفتاح ينحفظ في متصفحك هذا بس، وما يرفع لأي مكان غير Anthropic.</span>
   </div>
   <div class="info">
     <span id="status" class="status">جاهز</span>
     <span>المايك: <span id="micName">—</span></span>
     <span class="meter" title="مستوى الصوت"><i id="level"></i></span>
+    <span>الترجمة: <span id="engine">Google</span></span>
   </div>
 </div>
 <script>
@@ -112,6 +126,61 @@ async function translate(text, from, to) {
     return j.responseData.translatedText;
   }
 }
+
+// Finished sentences are translated by Claude when a key is saved; Google only fills in while a sentence is still being spoken
+const CLAUDE_MODEL = "claude-haiku-5-5";
+const SDK_URL = "https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.131.0/+esm";
+let claudeKey = "";
+try { claudeKey = localStorage.getItem("claudeKey") || ""; } catch {}
+let clientPromise = null, recent = [];
+
+function showEngine() { const e = $("engine"); e.textContent = claudeKey ? "Claude ✓" : "Google"; e.classList.toggle("on", !!claudeKey); }
+function getClaude() {
+  if (!clientPromise) clientPromise = import(SDK_URL)
+    .then(m => new m.default({ apiKey: claudeKey, dangerouslyAllowBrowser: true }))
+    .catch(e => { clientPromise = null; throw e; });
+  return clientPromise;
+}
+async function claudeTranslate(text, from, to, context) {
+  const client = await getClaude();
+  const target = to === "ar" ? "clear, natural Modern Standard Arabic" : "clear, natural English";
+  const res = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 2000,
+    thinking: { type: "adaptive" },
+    output_config: { effort: "low" },
+    system: "You are a live conference interpreter helping a listener follow a speaker. " +
+      "Translate the speech fragment into " + target + ". The text comes from automatic speech recognition, so it may have no punctuation, " +
+      "misheard words, or be cut mid-sentence: infer the intended meaning from the context and translate that meaning naturally, not word for word. " +
+      "Keep names, numbers and technical terms accurate. Reply with the translation only, no notes or quotes.",
+    messages: [{ role: "user", content: (context ? "<earlier_speech_for_context>\n" + context + "\n</earlier_speech_for_context>\n\n" : "") + "<speech_to_translate>\n" + text + "\n</speech_to_translate>" }]
+  });
+  const out = res.content.filter(b => b.type === "text").map(b => b.text).join("").trim();
+  if (!out) throw new Error("empty response");
+  return out;
+}
+function claudeError(e) {
+  const s = e?.status;
+  status(s === 401 ? "مفتاح Claude غير صحيح — صحّحه من زر 🔑" :
+         s === 402 || s === 400 && /credit/i.test(e?.message || "") ? "رصيد Anthropic خلص — اشحن الحساب" :
+         s === 429 ? "ضغط على Claude — يستخدم Google مؤقتًا" :
+         "تعذر الوصول لـ Claude — يستخدم Google مؤقتًا", "err");
+}
+
+$("keyBtn").onclick = () => { const p = $("keyPanel"); p.hidden = !p.hidden; if (!p.hidden) $("keyInput").focus(); };
+$("keySave").onclick = () => {
+  const k = $("keyInput").value.trim();
+  if (!k) return;
+  claudeKey = k; clientPromise = null;
+  try { localStorage.setItem("claudeKey", k); } catch {}
+  $("keyInput").value = ""; $("keyPanel").hidden = true; showEngine(); status("تم حفظ المفتاح — الترجمة الحين بـ Claude", "good");
+};
+$("keyRemove").onclick = () => {
+  claudeKey = ""; clientPromise = null;
+  try { localStorage.removeItem("claudeKey"); } catch {}
+  $("keyPanel").hidden = true; showEngine(); status("تم حذف المفتاح");
+};
+showEngine();
 
 // Text flows as one long script; a new paragraph starts only after a long pause
 function newParagraph() {
@@ -156,7 +225,17 @@ async function finalize(text) {
   clearTimeout(item.timer);
   lastFinalAt = Date.now();
   item.srcEl.textContent = text; item.srcEl.className = "";
-  const tr = await translateInto(item, text);
+  const context = recent.join(" ");
+  recent.push(text); if (recent.length > 4) recent.shift();
+  let tr;
+  if (claudeKey) {
+    const my = ++item.seq;
+    try {
+      tr = await claudeTranslate(text, item.from, item.to, context);
+      if (my >= item.shown) { item.shown = my; stickBoth(() => { item.trEl.textContent = tr; }); }
+      if (statusEl.classList.contains("err") && running) status("🎙️ يسمع — " + label(), "good");
+    } catch (e) { claudeError(e); tr = await translateInto(item, text); }
+  } else tr = await translateInto(item, text);
   item.trEl.className = "";
   if (tr && $("tts").checked) speak(tr, item.to);
 }
