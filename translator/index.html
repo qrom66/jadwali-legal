@@ -159,8 +159,8 @@ function startRec() {
     else if (e.error !== "no-speech" && e.error !== "aborted") status("خطأ في المايك: " + e.error, true);
   };
   rec.onend = () => { if (running) { try { rec.start(); } catch { setTimeout(startRec, 300); } } };  // keep listening through pauses
-  try { rec.start(); } catch (err) { status("ما قدر يشغّل المايك: " + err.message, true); }
   status("يشغّل المايك… " + label);
+  try { rec.start(); } catch (err) { status("ما قدر يشغّل المايك: " + err.message, true); }
 }
 
 function setBtn() { micBtn.classList.toggle("on", running); micBtn.textContent = running ? "⏹ إيقاف" : "🎤 ابدأ الترجمة"; }
