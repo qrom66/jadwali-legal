@@ -136,7 +136,12 @@ function startRec() {
   if (!SR) { status("المتصفح ما يدعم المايك. افتح الرابط في Safari (آيفون) أو Chrome (أندرويد).", true); return; }
   rec = new SR();
   rec.lang = src === "en" ? "en-US" : "ar-SA";
-  rec.continuous = true; rec.interimResults = true;
+  // Safari's continuous mode is unreliable; there we listen phrase by phrase and restart on end
+  rec.continuous = /Chrome|CriOS/.test(navigator.userAgent); rec.interimResults = true;
+  const label = "المتحدث يتكلم: " + (src === "en" ? "English" : "عربي");
+  rec.onaudiostart = () => status("🎙️ المايك شغّال — " + label);
+  rec.onsoundstart = () => status("🔊 يسمع صوت — " + label);
+  rec.onspeechstart = () => status("🗣️ يلتقط كلام — " + label);
   rec.onresult = e => {
     let interim = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -147,11 +152,15 @@ function startRec() {
     if (interim.trim()) showLive(interim.trim());
   };
   rec.onerror = e => {
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") { running = false; setBtn(); status("اسمح للمتصفح باستخدام المايك من إعدادات الموقع ثم اضغط ابدأ.", true); }
+    if (e.error === "not-allowed") { running = false; setBtn(); status("المتصفح ما عنده إذن للمايك. اسمح بالمايك لهذا الموقع ثم اضغط ابدأ.", true); }
+    else if (e.error === "service-not-allowed") { running = false; setBtn(); status("خدمة التعرف على الكلام مقفلة. في الماك: إعدادات النظام ← لوحة المفاتيح ← فعّل الإملاء. أو افتح الرابط في Chrome.", true); }
+    else if (e.error === "audio-capture") { running = false; setBtn(); status("ما فيه مايك متاح. تأكد أن المايك موصول ومسموح للمتصفح من إعدادات النظام ← الخصوصية ← الميكروفون.", true); }
+    else if (e.error === "network") status("مشكلة إنترنت في التعرف على الكلام — يحاول مرة ثانية…", true);
+    else if (e.error !== "no-speech" && e.error !== "aborted") status("خطأ في المايك: " + e.error, true);
   };
   rec.onend = () => { if (running) { try { rec.start(); } catch { setTimeout(startRec, 300); } } };  // keep listening through pauses
-  try { rec.start(); } catch {}
-  status("يسمع… المتحدث يتكلم: " + (src === "en" ? "English" : "عربي"));
+  try { rec.start(); } catch (err) { status("ما قدر يشغّل المايك: " + err.message, true); }
+  status("يشغّل المايك… " + label);
 }
 
 function setBtn() { micBtn.classList.toggle("on", running); micBtn.textContent = running ? "⏹ إيقاف" : "🎤 ابدأ الترجمة"; }
