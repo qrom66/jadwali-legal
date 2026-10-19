@@ -150,9 +150,13 @@ async function claudeTranslate(text, from, to, context) {
     thinking: { type: "adaptive" },
     output_config: { effort: "low" },
     system: "You are a live conference interpreter helping a listener follow a speaker. " +
-      "Translate the speech fragment into " + target + ". The text comes from automatic speech recognition, so it may have no punctuation, " +
-      "misheard words, or be cut mid-sentence: infer the intended meaning from the context and translate that meaning naturally, not word for word. " +
-      "Keep names, numbers and technical terms accurate. Reply with the translation only, no notes or quotes.",
+      "Translate the text inside <speech_to_translate> into " + target + ", faithfully and completely. " +
+      "Keep every detail the speaker said: words like first, next, last, this, today; the exact event words (conference, session, talk, event); " +
+      "tense, numbers, names and technical terms. Do not drop anything, do not add anything that was not said, and do not swap a word for a related one. " +
+      "Use natural wording, but stay close to the original meaning. " +
+      "The text comes from speech recognition and may lack punctuation or stop mid-sentence; translate it as it is. " +
+      "Only fix a word if it is clearly a recognition error that makes no sense in the sentence. " +
+      "The earlier speech is for context only: never translate or repeat it. Reply with the translation only, no notes or quotes.",
     messages: [{ role: "user", content: (context ? "<earlier_speech_for_context>\n" + context + "\n</earlier_speech_for_context>\n\n" : "") + "<speech_to_translate>\n" + text + "\n</speech_to_translate>" }]
   });
   const out = res.content.filter(b => b.type === "text").map(b => b.text).join("").trim();
